@@ -17,6 +17,9 @@ venv/
 myenv/
 sagam_env/
 
+# Claude Code local config
+.claude/
+
 # Office temp/lock files
 ~$*.docx
 ~$*.doc
