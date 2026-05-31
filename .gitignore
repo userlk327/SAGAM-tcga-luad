@@ -1,6 +1,8 @@
 # Never commit patient data!
 data/*.csv
 data/*.tsv
+dataset/
+geo_cache/
 
 # Python cache
 __pycache__/
@@ -13,3 +15,18 @@ results/
 .env
 venv/
 myenv/
+sagam_env/
+
+# Office temp/lock files
+~$*.docx
+~$*.doc
+~$*.pptx
+
+# LaTeX build artefacts
+*.aux
+*.out
+*.toc
+*.synctex
+*.synctex.gz
+*.fdb_latexmk
+*.fls

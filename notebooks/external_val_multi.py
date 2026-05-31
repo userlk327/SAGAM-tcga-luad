@@ -364,7 +364,7 @@ for GEO_ID, geo_data in geo_datasets.items():
         top100 = sorted(gene_ci_d, key=gene_ci_d.get, reverse=True)[:100]
         common_genes = [g for g in top100 if g in ext_expr.columns][:10]
     USE_GENES = common_genes
-    print(f"  Gene overlap: {len(USE_GENES)}/{len(TOP_GENES)}  → {USE_GENES}")
+    print(f"  Gene overlap: {len(USE_GENES)}/{len(TOP_GENES)}  -> {USE_GENES}")
 
     # --- Clinical features ---
     clin_cols = [c for c in TRANSFER_CLIN if c in df_tcga.columns]
@@ -489,7 +489,7 @@ for GEO_ID, geo_data in geo_datasets.items():
         dn = train_ds(Xi, yi, Xess.values, y_es, Xi.shape[1])
         oof[vl_i, 3] = ds_pred(dn, Xj)
 
-    # Final models → external predictions
+    # Final models -> external predictions
     rsf_f = RandomSurvivalForest(n_estimators=300, max_features='sqrt',
                                   min_samples_leaf=5, random_state=SEED, n_jobs=-1)
     rsf_f.fit(Xs.values, y_s); ext_rsf = rsf_f.predict(Xe.values)
@@ -587,16 +587,25 @@ for GEO_ID, geo_data in geo_datasets.items():
                  f'  Log-rank p={lr_lh.p_value:.4f} [{sig}]',
                  fontsize=11, fontweight='bold')
     ax.grid(True, alpha=0.3, linestyle='--'); ax.set_ylim(0, 1.05)
-    ax.legend(fontsize=10, loc='lower left')
+    # Filter out lifelines' auto-added "Significance" legend entry
+    handles, labels = ax.get_legend_handles_labels()
+    clean = [(h, l) for h, l in zip(handles, labels)
+             if not l.lower().startswith('significance')]
+    if clean:
+        h_list, l_list = zip(*clean)
+        ax.legend(h_list, l_list, fontsize=10, loc='lower left',
+                  framealpha=0.92, edgecolor='grey')
+    else:
+        ax.legend(fontsize=10, loc='lower left', framealpha=0.92)
     plt.tight_layout()
     km_path = OUTPUT_DIR / f'ext_km_{GEO_ID.lower()}.png'
     plt.savefig(km_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"  KM figure → {km_path.name}")
+    print(f"  KM figure -> {km_path.name}")
 
     # Save per-cohort text
     txt_path = OUTPUT_DIR / f'ext_val_{GEO_ID.lower()}.txt'
-    with open(txt_path, 'w') as f:
+    with open(txt_path, 'w', encoding='utf-8') as f:
         f.write(f"EXTERNAL VALIDATION — {GEO_ID}\n{'='*50}\n")
         f.write(f"n={n_ext}  events={ev_ext}  genes={', '.join(USE_GENES)}\n\n")
         for k, v in results.items(): f.write(f"  {k:<20}: {v:.4f}\n")
@@ -626,7 +635,7 @@ print("\n" + "=" * 70)
 print("MULTI-COHORT SUMMARY")
 print("=" * 70)
 print(f"\n{'Cohort':<12} {'n':>5} {'ev':>5} {'genes':>6} "
-      f"{'C_SAGAM':>8} {'C_Lin':>8} {'Δ(S-L)':>8} {'KM-p':>10}")
+      f"{'C_SAGAM':>8} {'C_Lin':>8} {'d(S-L)':>8} {'KM-p':>10}")
 print("-" * 68)
 for gid, r in all_results.items():
     print(f"  {gid:<10} {r['n']:>5} {r['events']:>5} {len(r['genes']):>6} "
@@ -635,7 +644,7 @@ for gid, r in all_results.items():
 
 summary_df = pd.DataFrame(all_results).T
 summary_df.to_csv(OUTPUT_DIR / 'ext_val_multi_summary.csv')
-print(f"\n✓ Summary → ext_val_multi_summary.csv")
+print(f"\n[OK] Summary -> ext_val_multi_summary.csv")
 print("=" * 70)
 print("DONE")
 print("=" * 70)

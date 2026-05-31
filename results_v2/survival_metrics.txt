@@ -1,0 +1,33 @@
+SURVIVAL METRICS — SAGAM BIBM 2026
+============================================================
+
+=== INTEGRATED BRIER SCORE (5-fold mean) ===
+RSF IBS: 0.1946
+GBS IBS: 0.2034
+
+=== TIME-DEPENDENT AUC ===
+Model               1-yr     3-yr     5-yr
+------------------------------------------
+Stage Cox         0.7407   0.6687   0.6482
+RSF               0.7115   0.6678   0.6880
+GBS               0.6662   0.6209   0.6655
+DeepSurv          0.6936   0.6517   0.6696
+Linear            0.7049   0.6395   0.6658
+SAGAM             0.6259   0.5788   0.5838
+
+=== EXTERNAL VALIDATION CIs ===
+Model                  C-index                 95% CI
+-------------------------------------------------------
+Stage-only Cox          0.6776 [0.568, 0.787]
+RSF                     0.5414 [0.425, 0.658]
+GBS                     0.4767 [0.360, 0.594]
+XGBoost-Cox             0.5378 [0.421, 0.655]
+DeepSurv                0.6261 [0.513, 0.739]
+Linear Stacking         0.5101 [0.393, 0.627]
+SAGAM                   0.5959 [0.481, 0.711]
+
+=== HAZARD RATIOS (SAGAM risk tertiles) ===
+                      exp(coef)  exp(coef) lower 95%  exp(coef) upper 95%      p
+covariate                                                                       
+risk_group[T.Low]         0.375                0.257                0.547  0.000
+risk_group[T.Medium]      0.728                0.521                1.017  0.063

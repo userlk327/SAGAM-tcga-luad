@@ -1,0 +1,25 @@
+MULTI-MODAL SAGAM RESULTS
+============================================================
+
+3-WAY NESTED CV COMPARISON (5-fold StratifiedKFold)
+Model                       Mean C    Std C  Delta vs Clin
+---------------------------------------------------------
+Expression-only             0.6549   0.0201        +0.0352
+Clinical-only               0.6197   0.0447        +0.0000
+Multi-Modal                 0.6700   0.0225        +0.0503
+
+Fold-level C-indices:
+  Expression-only: [0.6657, 0.6511, 0.6552, 0.6207, 0.6818]
+  Clinical-only: [0.7078, 0.5857, 0.5931, 0.6071, 0.6050]
+  Multi-Modal: [0.6996, 0.6346, 0.6776, 0.6560, 0.6823]
+
+MULTI-MODAL KM STRATIFICATION
+  Log-rank Low vs High: p=0.000000 [***]
+  Low Risk: Median OS = 71.5 mo
+  Medium Risk: Median OS = 49.3 mo
+  High Risk: Median OS = 32.8 mo
+
+ARCHITECTURE UPGRADES
+  DeepSurv: 64->32 (old) --> 128->64 + BatchNorm (new)
+  5th base learner: ExprCox (CoxNet on 10-gene panel)
+  Meta-learner: B-spline GAM on RSF, GBS, XGB, DS, ExprCox

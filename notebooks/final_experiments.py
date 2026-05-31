@@ -115,6 +115,16 @@ def tune_alpha(Xt, yt, Xv, yv):
         except: pass
     return ba
 
+def tune_alpha_on_train(Xt, yt, val_frac=0.2):
+    """Tune alpha using an internal train/val split — never touches test data."""
+    from sklearn.model_selection import train_test_split as _tts
+    try:
+        Xt2, Xv2, yt2, yv2 = _tts(Xt, yt, test_size=val_frac,
+                                    random_state=SEED, stratify=yt['event'])
+    except ValueError:
+        Xt2, Xv2, yt2, yv2 = _tts(Xt, yt, test_size=val_frac, random_state=SEED)
+    return tune_alpha(Xt2, yt2, Xv2, yv2)
+
 def build_splines(meta_df, feats, df_val=4):
     parts, dis, mapping = [], [], {}
     for f in feats:
@@ -151,7 +161,7 @@ df = df[df['OS_time'].notna() & (df['OS_time'] > 0)].copy().reset_index(drop=Tru
 LEAKAGE = ['OS_MONTHS','OS_STATUS','DSS_STATUS','DSS_MONTHS','DFS_STATUS','DFS_MONTHS',
            'PFS_STATUS','PFS_MONTHS','DAYS_LAST_FOLLOWUP','DAYS_TO_BIRTH',
            'DAYS_TO_INITIAL_PATHOLOGIC_DIAGNOSIS','PERSON_NEOPLASM_CANCER_STATUS',
-           'NEW_TUMOR_EVENT_AFTER_INITIAL_TREATMENT','PATIENT_ID','SAMPLE_ID',
+           'NEW_TUMOR_EVENT_AFTER_INITIAL_TREATMENT','RADIATION_THERAPY','PATIENT_ID','SAMPLE_ID',
            'OTHER_PATIENT_ID','SUBTYPE','CANCER_TYPE','CANCER_TYPE_DETAILED',
            'TUMOR_TYPE','CANCER_TYPE_ACRONYM','ONCOTREE_CODE','TISSUE_SOURCE_SITE',
            'TISSUE_SOURCE_SITE_CODE','SAMPLE_TYPE','SOMATIC_STATUS','ICD_10',
@@ -164,12 +174,11 @@ LEAKAGE = ['OS_MONTHS','OS_STATUS','DSS_STATUS','DSS_MONTHS','DFS_STATUS','DFS_M
 df.drop(columns=[c for c in LEAKAGE if c in df.columns], inplace=True, errors='ignore')
 
 ALL_FEATS = ['AJCC_PATHOLOGIC_TUMOR_STAGE','PATH_M_STAGE','PATH_N_STAGE','PATH_T_STAGE',
-             'AGE','SEX','GRADE','ETHNICITY','RACE','PRIOR_DX','RADIATION_THERAPY','WEIGHT',
+             'AGE','SEX','GRADE','ETHNICITY','RACE','PRIOR_DX','WEIGHT',
              'ANEUPLOIDY_SCORE','MSI_SCORE_MANTIS','MSI_SENSOR_SCORE','TMB_NONSYNONYMOUS',
              'TBL_SCORE','BUFFA_HYPOXIA_SCORE','WINTER_HYPOXIA_SCORE','RAGNUM_HYPOXIA_SCORE']
 STAGE_FEATS = ['AJCC_PATHOLOGIC_TUMOR_STAGE','PATH_M_STAGE','PATH_N_STAGE','PATH_T_STAGE']
 get_cols = lambda cols: [c for c in cols if c in df.columns]
-
 y_all = Surv.from_arrays(event=df['OS_event'].values, time=df['OS_time'].values)
 
 # Load pooled OOF predictions from main nested CV run
@@ -213,45 +222,56 @@ if fr is not None:
         Xs_tr = sc.fit_transform(Xp_tr); Xs_te = sc.transform(Xp_te)
 
         # Inner OOF for base learners (simplified: 3-fold)
+        # Early stopping set is carved out BEFORE inner CV so it never appears in ii_vl
         inn_kf = KFold(3, shuffle=True, random_state=SEED)
         oof = np.zeros((len(tr_i), 4))
-        X_es, y_es = Xs_tr[:int(0.15*len(Xs_tr))], y_tr[:int(0.15*len(y_tr))]
+        es_size = max(10, int(0.15 * len(Xs_tr)))
+        X_es, y_es = Xs_tr[:es_size], y_tr[:es_size]
+        Xs_tr_cv, y_tr_cv = Xs_tr[es_size:], y_tr[es_size:]   # CV only on non-ES samples
 
-        for ii_tr, ii_vl in inn_kf.split(Xs_tr):
-            Xi, Xj = Xs_tr[ii_tr], Xs_tr[ii_vl]
-            yi, yj = y_tr[ii_tr], y_tr[ii_vl]
+        for ii_tr, ii_vl in inn_kf.split(Xs_tr_cv):
+            # ii_tr/ii_vl index into Xs_tr_cv; offset by es_size to place into oof
+            Xi, Xj = Xs_tr_cv[ii_tr], Xs_tr_cv[ii_vl]
+            yi, yj = y_tr_cv[ii_tr], y_tr_cv[ii_vl]
+            oof_vl_idx = ii_vl + es_size   # offset: ES samples sit at oof[0:es_size]
             rsf = RandomSurvivalForest(n_estimators=200, max_features='sqrt',
                                        min_samples_leaf=5, random_state=SEED, n_jobs=-1)
-            rsf.fit(Xi, yi); oof[ii_vl, 0] = rsf.predict(Xj)
+            rsf.fit(Xi, yi); oof[oof_vl_idx, 0] = rsf.predict(Xj)
             gbs = GradientBoostingSurvivalAnalysis(n_estimators=200, learning_rate=0.05,
                                                    max_depth=3, random_state=SEED)
-            gbs.fit(Xi, yi); oof[ii_vl, 1] = gbs.predict(Xj)
+            gbs.fit(Xi, yi); oof[oof_vl_idx, 1] = gbs.predict(Xj)
 
             dt = xgb.DMatrix(Xi, label=[e['time'] for e in yi], weight=[e['event'] for e in yi])
             dv = xgb.DMatrix(X_es, label=[e['time'] for e in y_es], weight=[e['event'] for e in y_es])
             xm = xgb.train(XGB_P, dt, num_boost_round=300, evals=[(dv,'v')],
                            early_stopping_rounds=20, verbose_eval=False)
             it = getattr(xm, 'best_iteration', xm.num_boosted_rounds())
-            oof[ii_vl, 2] = xm.predict(xgb.DMatrix(Xj), iteration_range=(0, it))
+            oof[oof_vl_idx, 2] = xm.predict(xgb.DMatrix(Xj), iteration_range=(0, it))
 
             dn = train_ds(Xi, yi, X_es, y_es, Xi.shape[1])
-            oof[ii_vl, 3] = ds_pred(dn, Xj)
+            oof[oof_vl_idx, 3] = ds_pred(dn, Xj)
+        # Note: oof[0:es_size] remains zero — ES samples are excluded from meta-learner training
+        oof = oof[es_size:]   # drop the zero ES rows; meta-learner trains on CV samples only
+        y_tr_meta = y_tr_cv   # matching survival labels for meta-learner
 
-        # Final models for test
+        # Final models for test — train on Xs_tr[es_size:], validate on Xs_tr[:es_size]
+        # This ensures ES validation set is strictly disjoint from training data
+        Xs_tr_final = Xs_tr[es_size:]; y_tr_final = y_tr[es_size:]
         rsf_f = RandomSurvivalForest(n_estimators=200, max_features='sqrt',
                                      min_samples_leaf=5, random_state=SEED, n_jobs=-1)
-        rsf_f.fit(Xs_tr, y_tr)
+        rsf_f.fit(Xs_tr_final, y_tr_final)
         gbs_f = GradientBoostingSurvivalAnalysis(n_estimators=200, learning_rate=0.05,
                                                  max_depth=3, random_state=SEED)
-        gbs_f.fit(Xs_tr, y_tr)
-        xm_f = xgb.train(XGB_P, xgb.DMatrix(Xs_tr[:int(0.85*len(Xs_tr))],
-                          label=[e['time'] for e in y_tr[:int(0.85*len(y_tr))]],
-                          weight=[e['event'] for e in y_tr[:int(0.85*len(y_tr))]]),
-                         num_boost_round=300, evals=[(xgb.DMatrix(X_es),'v')],
+        gbs_f.fit(Xs_tr_final, y_tr_final)
+        xm_f = xgb.train(XGB_P, xgb.DMatrix(Xs_tr_final,
+                          label=[e['time'] for e in y_tr_final],
+                          weight=[e['event'] for e in y_tr_final]),
+                         num_boost_round=300, evals=[(xgb.DMatrix(X_es,
+                          label=[e['time'] for e in y_es],
+                          weight=[e['event'] for e in y_es]),'v')],
                          early_stopping_rounds=20, verbose_eval=False)
         it_f = getattr(xm_f, 'best_iteration', xm_f.num_boosted_rounds())
-        dn_f = train_ds(Xs_tr[:int(0.85*len(Xs_tr))], y_tr[:int(0.85*len(y_tr))],
-                        X_es, y_es, Xs_tr.shape[1])
+        dn_f = train_ds(Xs_tr_final, y_tr_final, X_es, y_es, Xs_tr.shape[1])
 
         te_preds = np.column_stack([
             rsf_f.predict(Xs_te),
@@ -270,7 +290,8 @@ if fr is not None:
         sp_te = apply_splines(meta_te, META_FEATS, dis)
         sp_te.columns = sp_tr.columns
 
-        y_tr_s = np.array(list(zip(y_tr['event'], y_tr['time'])),
+        # y_tr_meta matches oof rows (CV samples only, ES samples excluded)
+        y_tr_s = np.array(list(zip(y_tr_meta['event'], y_tr_meta['time'])),
                           dtype=[('event', bool), ('time', float)])
 
         sp_tv, sp_vl = train_test_split(sp_tr, test_size=0.2, random_state=SEED)
@@ -294,22 +315,14 @@ if fr is not None:
         sc_s = StandardScaler()
         Xss_tr = sc_s.fit_transform(Xss_tr); Xss_te = sc_s.transform(Xss_te)
 
-        a_s = tune_alpha(Xss_tr, y_tr_s, Xss_te, y_all[te_i])
-        stage_cox = coxnet(Xss_tr, y_tr_s, a_s)
+        # Stage Cox uses all training samples (no ES exclusion needed — no early stopping)
+        y_tr_full_s = np.array(list(zip(y_tr['event'], y_tr['time'])),
+                               dtype=[('event', bool), ('time', float)])
+        a_s = tune_alpha_on_train(Xss_tr, y_tr_full_s)   # fixed: no test data used
+        stage_cox = coxnet(Xss_tr, y_tr_full_s, a_s)
         stage_risk_te = stage_cox.predict(Xss_te)
 
-        # Stage + SAGAM (combine both risks)
-        combined = np.column_stack([stage_risk_te, sagam_risk_te])
-        y_te_s = np.array(list(zip(y_te['event'], y_te['time'])),
-                          dtype=[('event', bool), ('time', float)])
-        a_comb = tune_alpha(
-            np.column_stack([stage_risk_te[:int(0.8*len(stage_risk_te))],
-                             sagam_risk_te[:int(0.8*len(sagam_risk_te))]]),
-            y_te_s[:int(0.8*len(y_te_s))],
-            np.column_stack([stage_risk_te[int(0.8*len(stage_risk_te)):],
-                             sagam_risk_te[int(0.8*len(sagam_risk_te)):]]),
-            y_te_s[int(0.8*len(y_te_s)):])
-        # Simpler: just average standardized risks
+        # Stage + SAGAM: average standardized risks (no test data used)
         from sklearn.preprocessing import StandardScaler as SS
         both = np.column_stack([
             SS().fit_transform(stage_risk_te.reshape(-1,1)).ravel(),
@@ -500,13 +513,14 @@ for fold_i, (tr_i, te_i) in enumerate(outer_kf.split(np.arange(len(df)), y_all['
         ('cat', OneHotEncoder(drop='first', sparse_output=False, handle_unknown='ignore'),
          df.iloc[tr_i][stg_cols].select_dtypes(['object','category']).columns.tolist()),
     ], remainder='passthrough')
-    Xs_stg_tr = StandardScaler().fit_transform(pre_stg.fit_transform(df.iloc[tr_i][stg_cols]))
-    Xs_stg_te = StandardScaler().fit_transform(pre_stg.transform(df.iloc[te_i][stg_cols]))
-    a_stg = tune_alpha(Xs_stg_tr, y_tr_s, Xs_stg_te, y_all[te_i])
+    sc_stg = StandardScaler()
+    Xs_stg_tr = sc_stg.fit_transform(pre_stg.fit_transform(df.iloc[tr_i][stg_cols]))
+    Xs_stg_te = sc_stg.transform(pre_stg.transform(df.iloc[te_i][stg_cols]))  # fixed: train scaler
+    a_stg = tune_alpha_on_train(Xs_stg_tr, y_tr_s)                            # fixed: no test data
     risk_stg = coxnet(Xs_stg_tr, y_tr_s, a_stg).predict(Xs_stg_te)
 
     # Clinical Cox (CoxNet on all features)
-    a_clin = tune_alpha(Xs_tr, y_tr_s, Xs_te, y_all[te_i])
+    a_clin = tune_alpha_on_train(Xs_tr, y_tr_s)   # fixed: no test data
     risk_clin = coxnet(Xs_tr, y_tr_s, a_clin).predict(Xs_te)
 
     # RSF
@@ -536,16 +550,21 @@ for fold_i, (tr_i, te_i) in enumerate(outer_kf.split(np.arange(len(df)), y_all['
         dn_i = train_ds(Xs_tr[ii_tr],y_tr[ii_tr],X_es_i,y_es_i,Xs_tr.shape[1])
         oof[ii_vl,3] = ds_pred(dn_i, Xs_tr[ii_vl])
 
+    # Final models — train on Xs_tr[es_size_f:], validate on Xs_tr[:es_size_f] (disjoint)
+    es_size_f = max(5, int(0.15*len(Xs_tr)))
+    X_es2 = Xs_tr[:es_size_f];      y_es2 = y_tr[:es_size_f]
+    Xs_tr_f = Xs_tr[es_size_f:];    y_tr_f = y_tr[es_size_f:]
     rsf_f = RandomSurvivalForest(n_estimators=200,max_features='sqrt',min_samples_leaf=5,random_state=SEED,n_jobs=-1)
-    rsf_f.fit(Xs_tr, y_tr)
+    rsf_f.fit(Xs_tr_f, y_tr_f)
     gbs_f = GradientBoostingSurvivalAnalysis(n_estimators=200,learning_rate=0.05,max_depth=3,random_state=SEED)
-    gbs_f.fit(Xs_tr, y_tr)
-    X_es2 = Xs_tr[:max(5,int(0.15*len(Xs_tr)))]; y_es2 = y_tr[:max(5,int(0.15*len(y_tr)))]
-    xm_f = xgb.train(XGB_P,xgb.DMatrix(Xs_tr,label=[e['time'] for e in y_tr],
-                      weight=[e['event'] for e in y_tr]),num_boost_round=200,
-                     evals=[(xgb.DMatrix(X_es2),'v')],early_stopping_rounds=20,verbose_eval=False)
+    gbs_f.fit(Xs_tr_f, y_tr_f)
+    xm_f = xgb.train(XGB_P,xgb.DMatrix(Xs_tr_f,label=[e['time'] for e in y_tr_f],
+                      weight=[e['event'] for e in y_tr_f]),num_boost_round=200,
+                     evals=[(xgb.DMatrix(X_es2,label=[e['time'] for e in y_es2],
+                      weight=[e['event'] for e in y_es2]),'v')],
+                     early_stopping_rounds=20,verbose_eval=False)
     it_f = getattr(xm_f,'best_iteration',200)
-    dn_f = train_ds(Xs_tr,y_tr,X_es2,y_es2,Xs_tr.shape[1])
+    dn_f = train_ds(Xs_tr_f,y_tr_f,X_es2,y_es2,Xs_tr.shape[1])
 
     te_preds = np.column_stack([
         rsf_f.predict(Xs_te), gbs_f.predict(Xs_te),
@@ -588,8 +607,11 @@ for fold_i, (tr_i, te_i) in enumerate(outer_kf.split(np.arange(len(df)), y_all['
                 continue
             try:
                 _, auc_val = cumulative_dynamic_auc(y_tr_s, y_all[te_i], risk, [t])
-                tdauc_models[model_name][t].append(auc_val[0])
-            except: pass
+                # sksurv 0.27 may return scalar when single time given; use atleast_1d
+                tdauc_models[model_name][t].append(float(np.atleast_1d(auc_val)[0]))
+            except Exception as e:
+                if fold_i == 0 and model_name == 'SAGAM':
+                    print(f"    [err] t={t}: {e}")
 
     print(f"  Fold {fold_i+1} done.")
 
@@ -737,7 +759,16 @@ lr_mv = multivariate_logrank_test(final_ti, risk_grp, final_ev)
 sig = ('***' if lr_lh.p_value<0.001 else '**' if lr_lh.p_value<0.01
        else '*' if lr_lh.p_value<0.05 else 'NS')
 
-fig, ax = plt.subplots(figsize=(12, 9))
+from matplotlib.gridspec import GridSpec as _GS
+
+# ── layout: main KM plot + number-at-risk table beneath ──────────────
+fig = plt.figure(figsize=(12, 10))
+gs  = _GS(2, 1, figure=fig,
+          height_ratios=[4, 1],   # 4:1 main vs table
+          hspace=0.04)            # tight but no overlap
+ax  = fig.add_subplot(gs[0])
+ax2 = fig.add_subplot(gs[1], sharex=ax)
+
 colors_km = ['#2E7D32','#F57C00','#C62828']
 kmf = KaplanMeierFitter()
 
@@ -752,53 +783,129 @@ for i, (grp, color) in enumerate(zip(['Low Risk','Medium Risk','High Risk'], col
     except:
         median_survs[grp] = "NR"
 
-ax.set_xlabel('Time (Months)', fontsize=14, fontweight='bold')
+ax.set_xlabel('')                  # x-label goes on ax2 instead
 ax.set_ylabel('Overall Survival Probability', fontsize=14, fontweight='bold')
-ax.set_title(f'Kaplan-Meier by SAGAM Risk Tertile — TCGA-LUAD (n={len(df)}, Pooled OOF)\n'
-             f'Log-rank (Low vs High): p={lr_lh.p_value:.4f} [{sig}]',
-             fontsize=13, fontweight='bold')
+ax.set_title(
+    f'Kaplan-Meier by SAGAM Risk Tertile\n'
+    f'TCGA-LUAD (n={len(df)}, Pooled OOF) — Log-rank (Low vs High): '
+    f'p={lr_lh.p_value:.4f} [{sig}]',
+    fontsize=12, fontweight='bold', pad=8)
 ax.grid(True, alpha=0.3, linestyle='--'); ax.set_ylim(0, 1.05)
-ax.legend(fontsize=12, loc='lower left')
-ax.text(0.02, 0.05, f'{sig} ({lr_lh.p_value:.4e})',
-        transform=ax.transAxes, fontsize=12, fontweight='bold',
-        bbox=dict(boxstyle='round', facecolor='lightyellow', edgecolor='black', alpha=0.9))
+ax.tick_params(labelbottom=False)  # hide x tick labels on main plot
 
-# Median annotations
+# Clean legend — filter out lifelines' auto-added "Significance" entry
+handles, labels = ax.get_legend_handles_labels()
+clean = [(h, l) for h, l in zip(handles, labels)
+         if not l.lower().startswith('significance')]
+if clean:
+    h_list, l_list = zip(*clean)
+    ax.legend(h_list, l_list, fontsize=12, loc='lower left',
+              framealpha=0.92, edgecolor='grey')
+else:
+    ax.legend(fontsize=12, loc='lower left', framealpha=0.92, edgecolor='grey')
+
+# Median survival annotations — upper-right, stacked
 for i, (grp, ms_txt) in enumerate(median_survs.items()):
-    ax.text(0.98, 0.95-i*0.08, f"{grp}: Median = {ms_txt}",
-            transform=ax.transAxes, fontsize=11, fontweight='bold',
+    ax.text(0.98, 0.97 - i*0.09, f"{grp}: Median = {ms_txt}",
+            transform=ax.transAxes, fontsize=10, fontweight='bold',
             ha='right', va='top',
-            bbox=dict(boxstyle='round', facecolor=colors_km[i], alpha=0.2,
-                      edgecolor=colors_km[i], linewidth=2))
+            bbox=dict(boxstyle='round', facecolor=colors_km[i], alpha=0.15,
+                      edgecolor=colors_km[i], linewidth=1.5))
 
-# Number-at-risk table
+# ── Number-at-risk table (ax2) ────────────────────────────────────────
+# Use purely transAxes so every coordinate is a plain [0,1] fraction —
+# no risk of data-coordinate rows drifting into the KM plot area.
 time_points_nar = [0, 12, 24, 36, 48, 60]
-ax2 = ax.inset_axes([0, -0.28, 1, 0.22])
-ax2.set_xlim(ax.get_xlim()); ax2.set_ylim(0, 4)
-ax2.axis('off')
-ax2.text(-0.01, 3.5, 'At Risk:', transform=ax2.get_xaxis_transform(),
-         fontsize=10, fontweight='bold', ha='right')
+groups = ['Low Risk', 'Medium Risk', 'High Risk']
 
-for ri, (grp, color) in enumerate(zip(['Low Risk','Medium Risk','High Risk'], colors_km)):
-    mask = (risk_grp == grp)
+ax2.axis('off')
+ax2.set_xlabel('Time (Months)', fontsize=13, fontweight='bold', labelpad=4)
+
+# Map each time point to an x-fraction using the shared x-axis limits
+xlim = ax.get_xlim()
+x_fracs = [(t - xlim[0]) / (xlim[1] - xlim[0]) for t in time_points_nar]
+
+# Row y-fractions inside ax2 (0 = bottom, 1 = top)
+# 4 visual rows: header + 3 groups
+y_header   = 0.88
+y_rows     = [0.62, 0.37, 0.12]   # Low, Medium, High
+
+# Column header: time values
+for xf, t in zip(x_fracs, time_points_nar):
+    ax2.text(xf, y_header, str(t),
+             transform=ax2.transAxes,
+             fontsize=9, fontweight='bold', ha='center', va='center')
+
+# "Number at risk" side label
+ax2.text(-0.005, y_header, 'Time (mo)',
+         transform=ax2.transAxes, fontsize=8, fontstyle='italic',
+         ha='right', va='center', color='#444444')
+
+# One data row per group
+for ri, (grp, color, yr) in enumerate(zip(groups, colors_km, y_rows)):
+    mask   = (risk_grp == grp)
     grp_ti = final_ti[mask]
-    ax2.text(-0.01, 2.5-ri*1.0, grp, transform=ax2.get_xaxis_transform(),
-             fontsize=9, fontweight='bold', color=color, ha='right')
-    for tj, t in enumerate(time_points_nar):
-        n_at_risk = (grp_ti >= t).sum()
-        x_frac = t / (ax.get_xlim()[1])
-        ax2.text(x_frac, 2.5-ri*1.0, str(n_at_risk),
+    # Group label on the left margin
+    ax2.text(-0.005, yr, grp,
+             transform=ax2.transAxes, fontsize=9, fontweight='bold',
+             color=color, ha='right', va='center')
+    # Count at each time point
+    for xf, t in zip(x_fracs, time_points_nar):
+        n_at_risk = int((grp_ti >= t).sum())
+        ax2.text(xf, yr, str(n_at_risk),
                  transform=ax2.transAxes,
                  fontsize=9, ha='center', va='center', color=color)
-
-for tj, t in enumerate(time_points_nar):
-    x_frac = t / (ax.get_xlim()[1])
-    ax2.text(x_frac, 3.5, str(t), transform=ax2.transAxes,
-             fontsize=9, fontweight='bold', ha='center', va='center')
 
 plt.savefig(OUTPUT_DIR / 'kaplan_meier_nar.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("  KM with at-risk table saved.")
+
+# ── Simple KM figure (no at-risk table) ──────────────────────────────
+fig_s, ax_s = plt.subplots(figsize=(10, 7))
+kmf_s = KaplanMeierFitter()
+for i, (grp, color) in enumerate(zip(['Low Risk','Medium Risk','High Risk'], colors_km)):
+    mask = (risk_grp == grp)
+    kmf_s.fit(final_ti[mask], final_ev[mask], label=f"{grp} (n={mask.sum()})")
+    kmf_s.plot_survival_function(ax=ax_s, ci_show=True, linewidth=2.5,
+                                  color=color, alpha=0.9)
+
+ax_s.set_xlabel('Time (Months)', fontsize=13, fontweight='bold')
+ax_s.set_ylabel('Survival Probability', fontsize=13, fontweight='bold')
+ax_s.set_title(
+    f'Kaplan-Meier — SAGAM Risk Stratification (n={len(df)}, Pooled OOF)\n'
+    f'Log-rank Low vs High: p={lr_lh.p_value:.4f}  [{sig}]',
+    fontsize=12, fontweight='bold', pad=8)
+ax_s.grid(True, alpha=0.3, linestyle='--'); ax_s.set_ylim(0, 1.05)
+
+# Filter "Significance" entry added automatically by lifelines
+_hs, _ls = ax_s.get_legend_handles_labels()
+_clean_s = [(h, l) for h, l in zip(_hs, _ls)
+            if not l.lower().startswith('significance')]
+if _clean_s:
+    _hl_s, _ll_s = zip(*_clean_s)
+    ax_s.legend(_hl_s, _ll_s, fontsize=12, loc='lower left',
+                framealpha=0.92, edgecolor='grey')
+else:
+    ax_s.legend(fontsize=12, loc='lower left', framealpha=0.92, edgecolor='grey')
+
+# Median annotations at upper-right
+_med_s = {}
+for grp in ['Low Risk','Medium Risk','High Risk']:
+    mask = (risk_grp == grp)
+    kmf_s.fit(final_ti[mask], final_ev[mask])
+    ms = kmf_s.median_survival_time_
+    _med_s[grp] = f"{ms:.1f} mo" if not (np.isnan(ms) or np.isinf(ms)) else "NR"
+for i, (grp, ms_txt) in enumerate(_med_s.items()):
+    ax_s.text(0.98, 0.97 - i*0.09, f"{grp}: Median = {ms_txt}",
+              transform=ax_s.transAxes, fontsize=10, fontweight='bold',
+              ha='right', va='top',
+              bbox=dict(boxstyle='round', facecolor=colors_km[i], alpha=0.15,
+                        edgecolor=colors_km[i], linewidth=1.5))
+
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / 'kaplan_meier.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("  Simple KM figure saved.")
 
 # ================================================================
 # 7. SAVE ALL RESULTS
@@ -808,7 +915,7 @@ print("\n" + "=" * 50)
 print("SAVING FINAL EXPERIMENT RESULTS")
 print("=" * 50)
 
-with open(OUTPUT_DIR / 'final_experiments_results.txt', 'w') as f:
+with open(OUTPUT_DIR / 'final_experiments_results.txt', 'w', encoding='utf-8') as f:
     f.write("FINAL EXPERIMENTS — SAGAM BIBM 2026\n")
     f.write("="*60+"\n\n")
 
@@ -831,9 +938,9 @@ with open(OUTPUT_DIR / 'final_experiments_results.txt', 'w') as f:
     for m, aucs in tdauc_summary.items():
         f.write(f"{m:<20} {aucs[0]:>8.4f} {aucs[1]:>8.4f} {aucs[2]:>8.4f}\n")
 
-print(f"\n✓ Results saved: {OUTPUT_DIR}/final_experiments_results.txt")
-print(f"✓ 4-panel figure: {OUTPUT_DIR}/gam_smooths_4panel.png")
-print(f"✓ KM with at-risk: {OUTPUT_DIR}/kaplan_meier_nar.png")
+print(f"\n[OK] Results saved: {OUTPUT_DIR}/final_experiments_results.txt")
+print(f"[OK] 4-panel figure: {OUTPUT_DIR}/gam_smooths_4panel.png")
+print(f"[OK] KM with at-risk: {OUTPUT_DIR}/kaplan_meier_nar.png")
 print("\n" + "="*70)
 print("ALL FINAL EXPERIMENTS COMPLETE")
 print("="*70)

@@ -1,1 +1,9 @@
-{}
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import docx, PIL; print\\('docx+PIL OK', docx.__version__ if hasattr\\(docx,'__version__'\\) else 'ok'\\)\")",
+      "Bash(rm -f 'paper/~$GAM_IEEE_Paper.docx')",
+      "Bash(./sagam_env/Scripts/python.exe paper/build_docx.py)"
+    ]
+  }
+}

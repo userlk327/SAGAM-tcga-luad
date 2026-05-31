@@ -125,11 +125,11 @@ print(f"\n  Total test events (181 OS, split across 5 folds): {n_events_total}")
 print(f"  Events per test fold: {n_test_ev_fold:.0f}")
 print(f"  SE of C-index per fold: {se_fold:.4f}")
 print(f"  SE of mean C-index across folds: {se_mean:.4f}")
-print(f"  Approx minimum detectable effect (α=0.05, 80%% power, n=5 folds): Δ ≈ {detectable_delta:.3f}")
-print(f"  Observed SAGAM−Linear C-index: {obs_delta:+.4f}")
-print(f"  ➜ Study is powered to detect Δ≈{detectable_delta:.2f}; "
-      f"observed Δ={obs_delta:.3f} is below this threshold.")
-print(f"  ➜ Non-significance reflects insufficient power, not absence of effect.")
+print(f"  Approx minimum detectable effect (alpha=0.05, 80%% power, n=5 folds): delta ~= {detectable_delta:.3f}")
+print(f"  Observed SAGAM-Linear C-index: {obs_delta:+.4f}")
+print(f"  -> Study is powered to detect delta~={detectable_delta:.2f}; "
+      f"observed delta={obs_delta:.3f} is below this threshold.")
+print(f"  -> Non-significance reflects insufficient power, not absence of effect.")
 
 # ============================================================
 # 5. Subgroup analysis (requires pooled_predictions.csv)
@@ -173,7 +173,7 @@ if pooled_f.exists():
                 continue
             delta = c_g - c_l
             print(f"  {grp:<25}: n={n_g:3d}  ev={n_e:3d}  "
-                  f"GAM={c_g:.4f}  Lin={c_l:.4f}  Δ={delta:+.4f}")
+                  f"GAM={c_g:.4f}  Lin={c_l:.4f}  delta={delta:+.4f}")
             rows.append({'Group': grp, 'n': n_g, 'events': n_e,
                          'C_GAM': round(c_g, 4), 'C_Linear': round(c_l, 4),
                          'Delta': round(delta, 4)})
@@ -181,7 +181,7 @@ if pooled_f.exists():
         if rows:
             sg_df = pd.DataFrame(rows)
             sg_df.to_csv(OUTPUT_DIR / 'subgroup_analysis.csv', index=False)
-            print("  ✓ subgroup_analysis.csv saved")
+            print("  [OK] subgroup_analysis.csv saved")
     else:
         print("  No 'stage' column in pooled_predictions.csv — skipping.")
 else:
@@ -198,7 +198,7 @@ ibs_boot_df = pd.DataFrame({
     'boot_gam_minus_lin_c': boot_c,
 })
 ibs_boot_df.to_csv(OUTPUT_DIR / 'ibs_bootstrap.csv', index=False)
-print(f"\n✓ IBS bootstrap results saved → ibs_bootstrap.csv")
+print(f"\n[OK] IBS bootstrap results saved -> ibs_bootstrap.csv")
 
 # ============================================================
 # 7. LaTeX-ready summary for paper
@@ -216,8 +216,8 @@ IBS frac SAGAM < RSF:       {frac_gr:.1%}
 C-index frac GAM > Linear:  {frac_c:.1%}
 C-index boot CI:            [{ci_c[0]:+.3f}, {ci_c[1]:+.3f}]
 
-Power: detectable Δ ≈ {detectable_delta:.2f},  observed Δ = {obs_delta:.3f}
-→ add to paper: "With 181 events and 5 folds ($\\approx$36 test events/fold), \\
+Power: detectable delta ~= {detectable_delta:.2f},  observed delta = {obs_delta:.3f}
+-> add to paper: "With 181 events and 5 folds ($\\approx$36 test events/fold), \\
   the study is powered to detect C-index differences of $\\approx${detectable_delta:.2f}; \\
   the observed advantage of {obs_delta:.3f} lies below this threshold, reflecting \\
   limited statistical power rather than absence of effect."

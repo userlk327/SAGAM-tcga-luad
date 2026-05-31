@@ -1,0 +1,26 @@
+FINAL EXPERIMENTS — SAGAM BIBM 2026
+============================================================
+
+=== STAGE + SAGAM INCREMENTAL MODEL ===
+Stage-only (5-fold CV):     0.6542 ± 0.0511
+Stage + SAGAM (5-fold CV):  0.6568 ± 0.0202
+Delta (Stage+SAGAM - Stage): +0.0025
+Result: SAGAM ADDS INCREMENTAL VALUE
+
+=== EXTERNAL CLINICAL BASELINES ===
+GSE31210 Stage-only Cox C-index: 0.6776
+[Reference] GSE31210 SAGAM:       0.596 [0.483,0.709]
+[Reference] GSE31210 DeepSurv:    0.626
+[Reference] GSE31210 Linear:      0.510
+
+=== TIME-DEPENDENT AUC ===
+Model                    1-yr     3-yr     5-yr
+----------------------------------------------
+Stage Cox              0.6999   0.6634   0.6187
+Clinical Cox           0.6636   0.6745   0.6528
+RSF                    0.6666   0.6953   0.7052
+GBS                    0.6399   0.6829   0.6364
+XGB                    0.5154   0.6777   0.6277
+DS                     0.6484   0.6777   0.7101
+Linear                 0.6724   0.6884   0.6935
+SAGAM                  0.6352   0.6321   0.6588

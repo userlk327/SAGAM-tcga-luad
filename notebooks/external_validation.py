@@ -849,10 +849,15 @@ ax.set_title(f'External Validation — {GEO_ID} (LUAD, n={n_ext})\n'
              f'Log-rank p={lr_lh.p_value:.4f} [{sig}]',
              fontsize=12,fontweight='bold')
 ax.grid(True,alpha=0.3,linestyle='--'); ax.set_ylim(0,1.05)
-ax.legend(fontsize=11,loc='lower left')
-ax.text(0.02,0.05,f'Significance: {sig}',transform=ax.transAxes,fontsize=11,
-        fontweight='bold',
-        bbox=dict(boxstyle='round',facecolor='lightyellow',edgecolor='black',alpha=0.9))
+# Filter out lifelines' auto-added "Significance" legend entry
+_handles, _labels = ax.get_legend_handles_labels()
+_clean = [(h, l) for h, l in zip(_handles, _labels)
+          if not l.lower().startswith('significance')]
+if _clean:
+    _hl, _ll = zip(*_clean)
+    ax.legend(_hl, _ll, fontsize=11, loc='lower left', framealpha=0.92, edgecolor='grey')
+else:
+    ax.legend(fontsize=11, loc='lower left', framealpha=0.92)
 plt.tight_layout()
 plt.savefig(OUTPUT_DIR/'ext_kaplan_meier.png',dpi=300,bbox_inches='tight')
 plt.close()

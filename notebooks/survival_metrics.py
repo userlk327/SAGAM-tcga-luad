@@ -158,6 +158,15 @@ def tune_alpha(Xt,yt,Xv,yv,grid=[0.001,0.005,0.01,0.05,0.1,0.5]):
         except: pass
     return ba
 
+def tune_alpha_on_train(Xt, yt, val_frac=0.2):
+    """Tune alpha using an internal train split only — never touches test data."""
+    from sklearn.model_selection import train_test_split as _tts
+    try:
+        Xt2,Xv2,yt2,yv2 = _tts(Xt,yt,test_size=val_frac,random_state=SEED,stratify=yt['event'])
+    except ValueError:
+        Xt2,Xv2,yt2,yv2 = _tts(Xt,yt,test_size=val_frac,random_state=SEED)
+    return tune_alpha(Xt2,yt2,Xv2,yv2)
+
 META_FEATS=["RSF","GBS","XGB","DS"]
 
 for fold_i,(tr_i,te_i) in enumerate(outer_kf.split(np.arange(len(df)),y_all['event'])):
@@ -182,9 +191,10 @@ for fold_i,(tr_i,te_i) in enumerate(outer_kf.split(np.arange(len(df)),y_all['eve
         ('cat',OneHotEncoder(drop='first',sparse_output=False,handle_unknown='ignore'),
          df.iloc[tr_i][stg_c].select_dtypes(['object','category']).columns.tolist())],
         remainder='passthrough')
-    Xs_stg_tr=StandardScaler().fit_transform(pre_s.fit_transform(df.iloc[tr_i][stg_c]))
-    Xs_stg_te=StandardScaler().fit_transform(pre_s.transform(df.iloc[te_i][stg_c]))
-    a_stg=tune_alpha(Xs_stg_tr,y_tr_s,Xs_stg_te,y_te_s)
+    sc_stg=StandardScaler()
+    Xs_stg_tr=sc_stg.fit_transform(pre_s.fit_transform(df.iloc[tr_i][stg_c]))
+    Xs_stg_te=sc_stg.transform(pre_s.transform(df.iloc[te_i][stg_c]))  # fixed: train scaler
+    a_stg=tune_alpha_on_train(Xs_stg_tr,y_tr_s)                        # fixed: no test data
     risk_stg=coxnet_fit(Xs_stg_tr,y_tr_s,a_stg).predict(Xs_stg_te)
 
     # RSF + GBS (needed for IBS via native predict_survival_function)
@@ -196,35 +206,38 @@ for fold_i,(tr_i,te_i) in enumerate(outer_kf.split(np.arange(len(df)),y_all['eve
     gbs.fit(Xs_tr,y_tr); risk_gbs=gbs.predict(Xs_te)
 
     # Inner OOF for meta-learner
+    # ES samples carved out FIRST so they never appear in ii_vl (fixes overlap bug)
     inn_kf=KFold(3,shuffle=True,random_state=SEED)
-    oof=np.zeros((len(tr_i),4))
-    X_es=Xs_tr[:max(5,int(0.15*len(Xs_tr)))]
-    y_es=y_tr[:max(5,int(0.15*len(y_tr)))]
-    for ii_tr,ii_vl in inn_kf.split(Xs_tr):
+    es_size=max(10,int(0.15*len(Xs_tr)))
+    X_es=Xs_tr[:es_size]; y_es=y_tr[:es_size]
+    Xs_tr_cv=Xs_tr[es_size:]; y_tr_cv=y_tr[es_size:]
+    oof=np.zeros((len(Xs_tr_cv),4))
+    for ii_tr,ii_vl in inn_kf.split(Xs_tr_cv):          # CV on non-ES samples only
+        Xi,Xj=Xs_tr_cv[ii_tr],Xs_tr_cv[ii_vl]
+        yi,yj=y_tr_cv[ii_tr],y_tr_cv[ii_vl]
         rsf_i=RandomSurvivalForest(n_estimators=150,max_features='sqrt',
                                     min_samples_leaf=5,random_state=SEED,n_jobs=-1)
-        rsf_i.fit(Xs_tr[ii_tr],y_tr[ii_tr]); oof[ii_vl,0]=rsf_i.predict(Xs_tr[ii_vl])
+        rsf_i.fit(Xi,yi); oof[ii_vl,0]=rsf_i.predict(Xj)
         gbs_i=GradientBoostingSurvivalAnalysis(n_estimators=150,learning_rate=0.05,
                                                 max_depth=3,random_state=SEED)
-        gbs_i.fit(Xs_tr[ii_tr],y_tr[ii_tr]); oof[ii_vl,1]=gbs_i.predict(Xs_tr[ii_vl])
-        dt_i=xgb.DMatrix(Xs_tr[ii_tr],label=[e['time'] for e in y_tr[ii_tr]],
-                          weight=[e['event'] for e in y_tr[ii_tr]])
-        dv_i=xgb.DMatrix(X_es,label=[e['time'] for e in y_es],
-                          weight=[e['event'] for e in y_es])
+        gbs_i.fit(Xi,yi); oof[ii_vl,1]=gbs_i.predict(Xj)
+        dt_i=xgb.DMatrix(Xi,label=[e['time'] for e in yi],weight=[e['event'] for e in yi])
+        dv_i=xgb.DMatrix(X_es,label=[e['time'] for e in y_es],weight=[e['event'] for e in y_es])
         xm_i=xgb.train(XGB_P,dt_i,num_boost_round=200,evals=[(dv_i,'v')],
                         early_stopping_rounds=20,verbose_eval=False)
-        oof[ii_vl,2]=xm_i.predict(xgb.DMatrix(Xs_tr[ii_vl]),
+        oof[ii_vl,2]=xm_i.predict(xgb.DMatrix(Xj),          # fixed: real XGB OOF
                                     iteration_range=(0,getattr(xm_i,'best_iteration',200)))
-        dn_i=train_ds_fast(Xs_tr[ii_tr],y_tr[ii_tr],X_es,y_es,Xs_tr.shape[1])
-        oof[ii_vl,3]=ds_pred_cpu(dn_i,Xs_tr[ii_vl])
+        dn_i=train_ds_fast(Xi,yi,X_es,y_es,Xi.shape[1])
+        oof[ii_vl,3]=ds_pred_cpu(dn_i,Xj)                    # fixed: real DS OOF
+    y_tr_meta=y_tr_cv   # survival labels matching oof rows
 
-    # Final models for test
-    X_es2=Xs_tr[:max(5,int(0.15*len(Xs_tr)))]
-    y_es2=y_tr[:max(5,int(0.15*len(y_tr)))]
-    dn_f=train_ds_fast(Xs_tr,y_tr,X_es2,y_es2,Xs_tr.shape[1])
+    # Final models — train on Xs_tr[es_size:], validate on Xs_tr[:es_size] (disjoint)
+    X_es2=Xs_tr[:es_size]; y_es2=y_tr[:es_size]   # reuse es_size carved above
+    Xs_tr_f=Xs_tr[es_size:]; y_tr_f=y_tr[es_size:]
+    dn_f=train_ds_fast(Xs_tr_f,y_tr_f,X_es2,y_es2,Xs_tr.shape[1])
     risk_ds=ds_pred_cpu(dn_f,Xs_te)
 
-    dt_f=xgb.DMatrix(Xs_tr,label=[e['time'] for e in y_tr],weight=[e['event'] for e in y_tr])
+    dt_f=xgb.DMatrix(Xs_tr_f,label=[e['time'] for e in y_tr_f],weight=[e['event'] for e in y_tr_f])
     dv_f=xgb.DMatrix(X_es2,label=[e['time'] for e in y_es2],weight=[e['event'] for e in y_es2])
     xm_f=xgb.train(XGB_P,dt_f,num_boost_round=200,evals=[(dv_f,'v')],
                     early_stopping_rounds=20,verbose_eval=False)
@@ -258,15 +271,17 @@ for fold_i,(tr_i,te_i) in enumerate(outer_kf.split(np.arange(len(df)),y_all['eve
                                        index=meta_te.index) for i in range(4)],axis=1)
         sp_te.columns=sp_tr.columns
 
+        y_tr_meta_s=np.array(list(zip(y_tr_meta['event'],y_tr_meta['time'])),
+                             dtype=[('event',bool),('time',float)])
         sp_tv,sp_vl=train_test_split(sp_tr,test_size=0.2,random_state=SEED)
-        ym_tv=y_tr_s[sp_tv.index]; ym_vl=y_tr_s[sp_vl.index]
+        ym_tv=y_tr_meta_s[sp_tv.index]; ym_vl=y_tr_meta_s[sp_vl.index]
         a_gam=tune_alpha(sp_tv.values,ym_tv,sp_vl.values,ym_vl)
-        gam_m=coxnet_fit(sp_tr.values,y_tr_s,a_gam)
+        gam_m=coxnet_fit(sp_tr.values,y_tr_meta_s,a_gam)   # fixed: matches oof rows
         risk_gam=gam_m.predict(sp_te.values)
 
         a_lin=tune_alpha(meta_tr.loc[sp_tv.index].values,ym_tv,
                          meta_tr.loc[sp_vl.index].values,ym_vl)
-        lin_m=coxnet_fit(meta_tr.values,y_tr_s,a_lin)
+        lin_m=coxnet_fit(meta_tr.values,y_tr_meta_s,a_lin)   # fixed: matches oof rows
         risk_lin=lin_m.predict(meta_te.values)
     else:
         risk_gam=risk_lin=risk_rsf.copy()
@@ -380,33 +395,57 @@ for fold_i,(tr_i,te_i) in enumerate(cal_outer_kf.split(np.arange(len(df)),y_all[
         ('cat',OneHotEncoder(drop='first',sparse_output=False,handle_unknown='ignore'),
          df.iloc[tr_i][stg_c].select_dtypes(['object','category']).columns.tolist())],
         remainder='passthrough')
-    Xs_stg_tr=StandardScaler().fit_transform(pre_s.fit_transform(df.iloc[tr_i][stg_c]))
-    Xs_stg_te=StandardScaler().fit_transform(pre_s.transform(df.iloc[te_i][stg_c]))
-    a_stg=tune_alpha(Xs_stg_tr,y_tr_s,Xs_stg_te,y_all[te_i])
+    sc_stg2=StandardScaler()
+    Xs_stg_tr=sc_stg2.fit_transform(pre_s.fit_transform(df.iloc[tr_i][stg_c]))
+    Xs_stg_te=sc_stg2.transform(pre_s.transform(df.iloc[te_i][stg_c]))  # fixed: train scaler
+    a_stg=tune_alpha_on_train(Xs_stg_tr,y_tr_s)                         # fixed: no test data
     pooled_risk_stg_cal[te_i]=coxnet_fit(Xs_stg_tr,y_tr_s,a_stg).predict(Xs_stg_te)
 
-    # Quick RSF OOF for SAGAM
+    # OOF for SAGAM — ES set carved out BEFORE inner CV to prevent overlap (Bug 2 fix)
     inn_kf=KFold(3,shuffle=True,random_state=SEED)
-    oof=np.zeros((len(tr_i),4))
-    X_es=Xs_tr[:max(5,int(0.15*len(Xs_tr)))]
-    y_es=y_tr[:max(5,int(0.15*len(y_tr)))]
-    for ii_tr,ii_vl in inn_kf.split(Xs_tr):
+    es_sz=max(10,int(0.15*len(Xs_tr)))
+    X_es2=Xs_tr[:es_sz]; y_es2=y_tr[:es_sz]
+    Xs_tr_cv2=Xs_tr[es_sz:]; y_tr_cv2=y_tr[es_sz:]
+    oof=np.zeros((len(Xs_tr_cv2),4))
+    for ii_tr,ii_vl in inn_kf.split(Xs_tr_cv2):
+        Xi2,Xj2=Xs_tr_cv2[ii_tr],Xs_tr_cv2[ii_vl]
+        yi2,yj2=y_tr_cv2[ii_tr],y_tr_cv2[ii_vl]
         rsf_i=RandomSurvivalForest(n_estimators=100,max_features='sqrt',
                                     min_samples_leaf=5,random_state=SEED,n_jobs=-1)
-        rsf_i.fit(Xs_tr[ii_tr],y_tr[ii_tr]); oof[ii_vl,0]=rsf_i.predict(Xs_tr[ii_vl])
+        rsf_i.fit(Xi2,yi2); oof[ii_vl,0]=rsf_i.predict(Xj2)
         gbs_i=GradientBoostingSurvivalAnalysis(n_estimators=100,learning_rate=0.05,
                                                 max_depth=3,random_state=SEED)
-        gbs_i.fit(Xs_tr[ii_tr],y_tr[ii_tr]); oof[ii_vl,1]=gbs_i.predict(Xs_tr[ii_vl])
+        gbs_i.fit(Xi2,yi2); oof[ii_vl,1]=gbs_i.predict(Xj2)
+        dt_i2=xgb.DMatrix(Xi2,label=[e['time'] for e in yi2],weight=[e['event'] for e in yi2])
+        dv_i2=xgb.DMatrix(X_es2,label=[e['time'] for e in y_es2],weight=[e['event'] for e in y_es2])
+        xm_i2=xgb.train(XGB_P,dt_i2,num_boost_round=200,evals=[(dv_i2,'v')],
+                         early_stopping_rounds=20,verbose_eval=False)
+        oof[ii_vl,2]=xm_i2.predict(xgb.DMatrix(Xj2),   # fixed: real XGB OOF (Bug 4 fix)
+                                     iteration_range=(0,getattr(xm_i2,'best_iteration',200)))
+        dn_i2=train_ds_fast(Xi2,yi2,X_es2,y_es2,Xi2.shape[1])
+        oof[ii_vl,3]=ds_pred_cpu(dn_i2,Xj2)             # fixed: real DS OOF (Bug 4 fix)
+    y_tr_meta2=y_tr_cv2
 
+    # Final models — train on Xs_tr[es_sz:], validate on Xs_tr[:es_sz] (disjoint)
+    Xs_tr_f2=Xs_tr[es_sz:]; y_tr_f2=y_tr[es_sz:]
     rsf_f=RandomSurvivalForest(n_estimators=100,max_features='sqrt',
                                 min_samples_leaf=5,random_state=SEED,n_jobs=-1)
-    rsf_f.fit(Xs_tr,y_tr)
+    rsf_f.fit(Xs_tr_f2,y_tr_f2)
     gbs_f=GradientBoostingSurvivalAnalysis(n_estimators=100,learning_rate=0.05,
                                             max_depth=3,random_state=SEED)
-    gbs_f.fit(Xs_tr,y_tr)
-    oof[:,2]=oof[:,0]; oof[:,3]=oof[:,1]  # use RSF/GBS for XGB/DS slots
+    gbs_f.fit(Xs_tr_f2,y_tr_f2)
+    dt_f2=xgb.DMatrix(Xs_tr_f2,label=[e['time'] for e in y_tr_f2],weight=[e['event'] for e in y_tr_f2])
+    xm_f2=xgb.train(XGB_P,dt_f2,num_boost_round=200,
+                     evals=[(xgb.DMatrix(X_es2,label=[e['time'] for e in y_es2],
+                      weight=[e['event'] for e in y_es2]),'v')],
+                     early_stopping_rounds=20,verbose_eval=False)
+    it_f2=getattr(xm_f2,'best_iteration',200)
+    risk_xgb_te=xm_f2.predict(xgb.DMatrix(Xs_te),iteration_range=(0,it_f2))
+    dn_f2=train_ds_fast(Xs_tr_f2,y_tr_f2,X_es2,y_es2,Xs_tr.shape[1])
+    risk_ds_te=ds_pred_cpu(dn_f2,Xs_te)
 
-    te_preds=np.column_stack([rsf_f.predict(Xs_te)]*4)
+    te_preds=np.column_stack([rsf_f.predict(Xs_te),gbs_f.predict(Xs_te),
+                               risk_xgb_te,risk_ds_te])  # fixed: 4 distinct predictions
     meta_tr=pd.DataFrame(oof,columns=META_FEATS)
     meta_te=pd.DataFrame(te_preds,columns=META_FEATS)
     for f in META_FEATS:
@@ -425,15 +464,17 @@ for fold_i,(tr_i,te_i) in enumerate(cal_outer_kf.split(np.arange(len(df)),y_all[
                                    index=meta_te.index) for i in range(4)],axis=1)
     sp_te.columns=sp_tr.columns
 
+    y_tr_meta2_s=np.array(list(zip(y_tr_meta2['event'],y_tr_meta2['time'])),
+                          dtype=[('event',bool),('time',float)])
     sp_tv,sp_vl=train_test_split(sp_tr,test_size=0.2,random_state=SEED)
-    ym_tv=y_tr_s[sp_tv.index]; ym_vl=y_tr_s[sp_vl.index]
+    ym_tv=y_tr_meta2_s[sp_tv.index]; ym_vl=y_tr_meta2_s[sp_vl.index]
     a_gam=tune_alpha(sp_tv.values,ym_tv,sp_vl.values,ym_vl)
-    gam_m=coxnet_fit(sp_tr.values,y_tr_s,a_gam)
+    gam_m=coxnet_fit(sp_tr.values,y_tr_meta2_s,a_gam)  # fixed: matches oof rows
     pooled_risk_gam_cal[te_i]=gam_m.predict(sp_te.values)
 
     a_lin=tune_alpha(meta_tr.loc[sp_tv.index].values,ym_tv,
                      meta_tr.loc[sp_vl.index].values,ym_vl)
-    lin_m=coxnet_fit(meta_tr.values,y_tr_s,a_lin)
+    lin_m=coxnet_fit(meta_tr.values,y_tr_meta2_s,a_lin)  # fixed: matches oof rows
     pooled_risk_lin_cal[te_i]=lin_m.predict(meta_te.values)
 
     print(f"    Fold {fold_i+1} done.")
@@ -601,7 +642,7 @@ print("\n" + "=" * 50)
 print("SAVING ALL METRICS")
 print("=" * 50)
 
-with open(OUTPUT_DIR / 'survival_metrics.txt', 'w') as f:
+with open(OUTPUT_DIR / 'survival_metrics.txt', 'w', encoding='utf-8') as f:
     f.write("SURVIVAL METRICS — SAGAM BIBM 2026\n")
     f.write("="*60+"\n\n")
 
@@ -625,9 +666,9 @@ with open(OUTPUT_DIR / 'survival_metrics.txt', 'w') as f:
         f.write("\n=== HAZARD RATIOS (SAGAM risk tertiles) ===\n")
         f.write(hr_table.to_string()+"\n")
 
-print(f"✓ Metrics:      {OUTPUT_DIR}/survival_metrics.txt")
-print(f"✓ Calibration:  {OUTPUT_DIR}/calibration_plot.png")
-print(f"✓ External CIs: {OUTPUT_DIR}/external_bootstrap_cis.csv")
+print(f"[OK] Metrics:      {OUTPUT_DIR}/survival_metrics.txt")
+print(f"[OK] Calibration:  {OUTPUT_DIR}/calibration_plot.png")
+print(f"[OK] External CIs: {OUTPUT_DIR}/external_bootstrap_cis.csv")
 print("\n"+"="*70)
 print("SURVIVAL METRICS COMPLETE")
 print("="*70)

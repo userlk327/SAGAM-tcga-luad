@@ -267,8 +267,8 @@ def run_sagam_df_ablation(df_val, n_folds=5):
 for df_val in [3, 4, 5, 6]:
     m, s = run_sagam_df_ablation(df_val)
     df_ablation_results[df_val] = (m, s)
-    tag = " ← current" if df_val == 4 else ""
-    print(f"  SAGAM df={df_val}: {m:.4f} ± {s:.4f}{tag}")
+    tag = " <- current" if df_val == 4 else ""
+    print(f"  SAGAM df={df_val}: {m:.4f} +/- {s:.4f}{tag}")
 
 # ================================================================
 # 4. INTEGRATED BRIER SCORE & TIME-DEPENDENT AUC
@@ -354,10 +354,11 @@ for i, (rsf_mat, gbs_mat, y_te) in enumerate(
         tg = times_grid[valid_mask]
         if len(tg) < 2: continue
 
-        _, ibs_r = integrated_brier_score(y_tr_all, y_te, rsf_mat[:, valid_mask], tg)
-        _, ibs_g = integrated_brier_score(y_tr_all, y_te, gbs_mat[:, valid_mask], tg)
-        ibs_rsf_vals.append(ibs_r)
-        ibs_gbs_vals.append(ibs_g)
+        # sksurv 0.27: integrated_brier_score returns a scalar, not a tuple
+        ibs_r = integrated_brier_score(y_tr_all, y_te, rsf_mat[:, valid_mask], tg)
+        ibs_g = integrated_brier_score(y_tr_all, y_te, gbs_mat[:, valid_mask], tg)
+        ibs_rsf_vals.append(float(np.atleast_1d(ibs_r)[0]))
+        ibs_gbs_vals.append(float(np.atleast_1d(ibs_g)[0]))
     except Exception as e:
         print(f"    IBS fold {i} error: {e}")
 
@@ -406,8 +407,9 @@ for tr_i, te_i in outer_kf2.split(np.arange(len(df)), y_all['event']):
                 continue
             _, auc_r = cumulative_dynamic_auc(y_tr, y_te, rsf_risk, [t])
             _, auc_g = cumulative_dynamic_auc(y_tr, y_te, gbs_risk, [t])
-            tdauc_rsf_folds[t].append(auc_r[0])
-            tdauc_gbs_folds[t].append(auc_g[0])
+            # sksurv 0.27 may return scalar for single time point
+            tdauc_rsf_folds[t].append(float(np.atleast_1d(auc_r)[0]))
+            tdauc_gbs_folds[t].append(float(np.atleast_1d(auc_g)[0]))
         except:
             pass
 
@@ -443,7 +445,7 @@ if fold_results_path.exists():
     except:
         p_gl = np.nan
     mean_gl = diffs_gl.mean()
-    print(f"  SAGAM vs Linear:  mean Δ={mean_gl:+.4f}  Wilcoxon p={p_gl:.4f}")
+    print(f"  SAGAM vs Linear:  mean delta={mean_gl:+.4f}  Wilcoxon p={p_gl:.4f}")
 
     # SAGAM vs DeepSurv
     diffs_gd = gam_folds - ds_folds
@@ -452,7 +454,7 @@ if fold_results_path.exists():
     except:
         p_gd = np.nan
     mean_gd = diffs_gd.mean()
-    print(f"  SAGAM vs DeepSurv: mean Δ={mean_gd:+.4f}  Wilcoxon p={p_gd:.4f}")
+    print(f"  SAGAM vs DeepSurv: mean delta={mean_gd:+.4f}  Wilcoxon p={p_gd:.4f}")
 
     # SAGAM vs RSF
     diffs_gr = gam_folds - rsf_folds
@@ -461,18 +463,18 @@ if fold_results_path.exists():
     except:
         p_gr = np.nan
     mean_gr = diffs_gr.mean()
-    print(f"  SAGAM vs RSF:     mean Δ={mean_gr:+.4f}  Wilcoxon p={p_gr:.4f}")
+    print(f"  SAGAM vs RSF:     mean delta={mean_gr:+.4f}  Wilcoxon p={p_gr:.4f}")
 else:
     print("  fold_results.csv not found.")
     p_gl = p_gd = p_gr = np.nan
     mean_gl = mean_gd = mean_gr = np.nan
 
 # ================================================================
-# 6. STAGE I/II TCGA TRAINING → GSE31210 EXTERNAL VALIDATION
+# 6. STAGE I/II TCGA TRAINING -> GSE31210 EXTERNAL VALIDATION
 # ================================================================
 
 print("\n" + "=" * 50)
-print("EXPERIMENT 5: STAGE I/II TCGA → GSE31210")
+print("EXPERIMENT 5: STAGE I/II TCGA -> GSE31210")
 print("=" * 50)
 
 # Check if stage info is available
@@ -486,7 +488,7 @@ if 'AJCC_PATHOLOGIC_TUMOR_STAGE' in df.columns:
     n_events_iorii = df.loc[stage_iorii_mask, 'OS_event'].sum()
     print(f"  TCGA Stage I/II patients: {n_stage_iorii}  events: {n_events_iorii}")
     print(f"  (Full TCGA external C-index was 0.596, full external KM p=0.030)")
-    print(f"  Stage I/II TCGA→GSE31210 experiment requires re-running")
+    print(f"  Stage I/II TCGA->GSE31210 experiment requires re-running")
     print(f"  external_validation.py with stage filter — see code below:")
     print(f"  Add: df = df[stage_iorii_mask] before training SAGAM")
 else:
@@ -508,8 +510,8 @@ results = {
                            'IBS RSF (5-fold)', 'IBS GBS (5-fold)',
                            'Wilcoxon p SAGAM vs Linear',
                            'Wilcoxon p SAGAM vs DeepSurv',
-                           'Mean fold Δ SAGAM-Linear',
-                           'Mean fold Δ SAGAM-DeepSurv'],
+                           'Mean fold delta SAGAM-Linear',
+                           'Mean fold delta SAGAM-DeepSurv'],
     'Value':             [stage_c, clin_c, clin_gen_c, full_c,
                           df_ablation_results.get(3,(np.nan,np.nan))[0],
                           df_ablation_results.get(4,(np.nan,np.nan))[0],
@@ -528,7 +530,7 @@ results = {
 res_df = pd.DataFrame(results)
 res_df.to_csv(OUTPUT_DIR / 'supplementary_metrics.csv', index=False)
 
-with open(OUTPUT_DIR / 'supplementary_results.txt', 'w') as f:
+with open(OUTPUT_DIR / 'supplementary_results.txt', 'w', encoding='utf-8') as f:
     f.write("SUPPLEMENTARY RESULTS — SAGAM BIBM 2026\n")
     f.write("=" * 60 + "\n\n")
     f.write("=== COX BASELINES (5-fold nested CV) ===\n")
@@ -542,18 +544,18 @@ with open(OUTPUT_DIR / 'supplementary_results.txt', 'w') as f:
     f.write("=== SPLINE df ABLATION ===\n")
     for dv in [3,4,5,6]:
         m,s = df_ablation_results.get(dv,(np.nan,np.nan))
-        tag = " ← current" if dv == 4 else ""
-        f.write(f"SAGAM df={dv}: {m:.4f} ± {s:.4f}{tag}\n")
+        tag = " <- current" if dv == 4 else ""
+        f.write(f"SAGAM df={dv}: {m:.4f} +/- {s:.4f}{tag}\n")
     f.write("\n=== IBS (5-fold mean) ===\n")
     f.write(f"IBS RSF: {ibs_rsf:.4f}\n")
     f.write(f"IBS GBS: {ibs_gbs:.4f}\n")
     f.write("\n=== PAIRED BOOTSTRAP (5-fold Wilcoxon) ===\n")
-    f.write(f"SAGAM vs Linear:   mean Δ={mean_gl:+.4f}  p={p_gl:.4f}\n")
-    f.write(f"SAGAM vs DeepSurv: mean Δ={mean_gd:+.4f}  p={p_gd:.4f}\n")
-    f.write(f"SAGAM vs RSF:      mean Δ={mean_gr:+.4f}  p={p_gr:.4f}\n")
+    f.write(f"SAGAM vs Linear:   mean delta={mean_gl:+.4f}  p={p_gl:.4f}\n")
+    f.write(f"SAGAM vs DeepSurv: mean delta={mean_gd:+.4f}  p={p_gd:.4f}\n")
+    f.write(f"SAGAM vs RSF:      mean delta={mean_gr:+.4f}  p={p_gr:.4f}\n")
 
-print(f"\n✓ Results saved to: {OUTPUT_DIR}/supplementary_results.txt")
-print(f"✓ CSV saved to:     {OUTPUT_DIR}/supplementary_metrics.csv")
+print(f"\n[OK] Results saved to: {OUTPUT_DIR}/supplementary_results.txt")
+print(f"[OK] CSV saved to:     {OUTPUT_DIR}/supplementary_metrics.csv")
 print("\n" + "=" * 70)
 print("ALL SUPPLEMENTARY EXPERIMENTS COMPLETE")
 print("=" * 70)
